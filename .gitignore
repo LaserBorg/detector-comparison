@@ -1,0 +1,29 @@
+# Model artifacts (checkpoints, exported onnx/engine) — large, rebuildable
+models/
+!models/.gitkeep
+
+# Sample input video + calibration data
+data/
+!data/.gitkeep
+
+# Benchmark outputs (csv / markdown / annotated videos)
+results/
+!results/.gitkeep
+
+# ONNX Runtime TensorRT engine cache
+models/ort_trt_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.eggs/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

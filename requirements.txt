@@ -1,0 +1,29 @@
+# YOLO inference benchmark requirements
+#
+# NOTE: install ordering matters on NVIDIA. Install torch first (matching your
+# CUDA toolkit), then the other packages. TensorRT wheels are CUDA-versioned.
+#
+# Recommended base environment: Python 3.12 (not 3.13/3.14 — several of these
+# do not yet ship wheels for 3.14).
+
+# --- Core runtime -----------------------------------------------------------
+numpy>=1.26
+opencv-python>=4.9
+# PyTorch with CUDA 12.x — pick the right index per your CUDA version:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# Pin a version known to support your hardware:
+torch>=2.4
+
+# --- Ultralytics (model load/export + reference predictions) ----------------
+ultralytics>=8.3.0
+onnx>=1.16
+
+# --- ONNX Runtime: GPU (CUDA + TensorRT EPs) --------------------------------
+# Install the version matching your CUDA / TensorRT major (see onnxruntime
+# docs). For CUDA 12.x:
+onnxruntime-gpu>=1.20
+
+# --- Native TensorRT --------------------------------------------------------
+# Install the wheel matching your CUDA (e.g. tensorrt==10.x-cu12). Provides
+# both the Python bindings and the 'trtexec' binary.
+tensorrt>=10.0
