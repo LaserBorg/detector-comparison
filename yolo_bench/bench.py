@@ -14,7 +14,7 @@ project exists to compare:
 Usage
 -----
   python -m yolo_bench.bench --runtime tensorrt --precision fp16 \
-      --model yolo11s --video data/sample.mp4 --frames 100
+      --model yolo11s --video data/sample_1080p_h264.mp4 --frames 100
 """
 
 from __future__ import annotations
@@ -28,9 +28,10 @@ import numpy as np
 
 from . import config
 from .detector import Detector
+from .env import fingerprint
 from .utils import (
-    class_names, current_host_rss_mb, ensure_dirs, env_summary,
-    peek_vram_gb, reset_vram, summarize,
+    class_names, current_host_rss_mb, device_vram_used_gb, ensure_dirs,
+    load_meta, model_size_class, reset_vram, summarize,
 )
 
 
@@ -93,6 +94,7 @@ def run_benchmark(
     """Run the benchmark and return a dict of results."""
     ensure_dirs()
     arch = architecture or config.arch_for(model)
+    meta = load_meta(model) or {}
 
     det = Detector(arch, runtime_kind, precision, model, conf=conf, iou=iou)
     det.load()
@@ -109,6 +111,8 @@ def run_benchmark(
     det.warmup(frame_list[0], n=warmup)
 
     reset_vram(track=True)
+    base_vram_gb = device_vram_used_gb()
+    peak_vram_gb = base_vram_gb
     dets_out: list[np.ndarray] = []
 
     for frame in frame_list:
@@ -118,13 +122,18 @@ def run_benchmark(
         post_times.append(post_s)
         e2e_times.append(pre_s + inf_s + post_s)
         dets_out.append(dets)
+        # Sample device memory inside the loop: TensorRT/ORT allocate outside
+        # PyTorch's allocator, so an end-of-run reading can miss their peak.
+        peak_vram_gb = max(peak_vram_gb, device_vram_used_gb())
 
     if annotate is not None:
         _annotate(frame_list, dets_out, nc, annotate)
 
-    peak_gb = peek_vram_gb()
     host_mb = current_host_rss_mb()
     weights_mb = det.weights_mb
+    # Record the backend's own version (TensorRT/ORT/OpenVINO differ per
+    # runtime, so this cannot live only in the environment block).
+    runtime_version = det.runtime_version
     det.release()
 
     return {
@@ -146,11 +155,22 @@ def run_benchmark(
         "post_ms": summarize(post_times)["mean"] * 1e3,
         # framerate
         "fps": 1.0 / summarize(e2e_times)["mean"] if e2e_times else 0.0,
-        # memory footprint
-        "peak_vram_gb": peak_gb,
+        # memory footprint (device-wide: includes non-torch allocators)
+        "peak_vram_gb": peak_vram_gb,
+        "base_vram_gb": base_vram_gb,
         "host_rss_mb": host_mb,
         "weights_mb": weights_mb,
-        **env_summary(),
+        "runtime_version": runtime_version,
+        # Model cost, read from the .meta.json written at export time. Needed to
+        # plot performance against model size; None when the metadata predates
+        # complexity capture (run `export --meta-only` to fill it in).
+        "params_m": meta.get("params_m"),
+        "gflops": meta.get("gflops"),
+        "model_size": model_size_class(model),
+        # Full hardware/library fingerprint: this project is cloned onto an RTX
+        # 3070 and a Jetson Orin Nano, and merged rows are only comparable if
+        # every row carries CPU, GPU arch, OS and library versions.
+        **fingerprint(),
     }
 
 

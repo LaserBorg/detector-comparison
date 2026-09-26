@@ -1,41 +1,43 @@
-"""Runtime executors: PyTorch / ONNX Runtime (CUDA + TensorRT) / native TensorRT.
+"""Runtime executors: PyTorch / ONNX Runtime / TensorRT / OpenVINO.
 
-Import lazily so the package stays importable on a machine with a subset of the
-backends installed (e.g. no TensorRT on the GTX 960M, no PyTorch on a minimal
-Jetson image).
+The set of backends and their capabilities live in :mod:`.registry` — this module
+just re-exports it so callers have one obvious import point:
+
+    from yolo_bench.runtimes import create_runtime, spec_for, ALL_KINDS
+
+Executors are imported lazily by the registry's factories, so importing this
+package does not drag in torch / tensorrt / openvino and stays cheap on a machine
+that only has a subset installed.
 """
 
 from .base import RuntimeAdapter, RuntimeExecutor
+from .registry import (
+    ALL_KINDS,
+    ARTIFACT_ENGINE,
+    ARTIFACT_ONNX,
+    ARTIFACT_TORCH_RUNNER,
+    CPU_KINDS,
+    CUDA_KINDS,
+    REGISTRY,
+    RUNTIME_SPECS,
+    RuntimeSpec,
+    UnknownRuntime,
+    UnsupportedPrecision,
+    available_kinds,
+    create_runtime,
+    describe,
+    importable,
+    plan,
+    spec_for,
+    unavailable_kinds,
+)
 
-
-def create_runtime(kind: str, precision: str) -> RuntimeExecutor:
-    """Factory for a runtime executor.
-
-    Args:
-        kind: one of 'pytorch' | 'ort_cuda' | 'ort_trt' | 'tensorrt'
-        precision: 'fp32' | 'fp16'
-    """
-    kind = kind.lower()
-    try:
-        if kind == "pytorch":
-            from .pytorch import PyTorchExecutor
-            return PyTorchExecutor(precision)
-        if kind == "ort_cuda":
-            from .ort import OnnxRuntimeCuda
-            return OnnxRuntimeCuda(precision)
-        if kind == "ort_trt":
-            from .ort import OnnxRuntimeTensorrt
-            return OnnxRuntimeTensorrt(precision)
-        if kind == "tensorrt":
-            from .tensorrt import TensorRTExecutor
-            return TensorRTExecutor(precision)
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError(
-            f"Runtime '{kind}' requires an optional dependency that is not "
-            f"installed in this environment: {exc}"
-        ) from exc
-    raise ValueError(f"Unknown runtime kind: {kind!r} (expected one of "
-                     f"pytorch, ort_cuda, ort_trt, tensorrt)")
-
-
-__all__ = ["RuntimeExecutor", "RuntimeAdapter", "create_runtime"]
+__all__ = [
+    "RuntimeAdapter", "RuntimeExecutor",
+    "RuntimeSpec", "RUNTIME_SPECS", "REGISTRY",
+    "ALL_KINDS", "CUDA_KINDS", "CPU_KINDS",
+    "ARTIFACT_TORCH_RUNNER", "ARTIFACT_ONNX", "ARTIFACT_ENGINE",
+    "UnknownRuntime", "UnsupportedPrecision",
+    "create_runtime", "spec_for", "importable", "available_kinds",
+    "unavailable_kinds", "plan", "describe",
+]

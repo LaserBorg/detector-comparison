@@ -42,6 +42,38 @@ def class_names(nc: int) -> list[str]:
     return [f"class-{i}" for i in range(nc)]
 
 
+# Size letter -> complexity class. Ultralytics naming: n/s/m/l/x.
+_MODEL_SIZE_CLASSES = {
+    "n": "nano", "s": "small", "m": "medium", "l": "large", "x": "xlarge",
+}
+
+
+def model_size_class(model: str) -> str | None:
+    """Complexity class of a model name, e.g. 'yolo11s' -> 'small'.
+
+    Used to split the comparison into small (n/s) and large (m/l/x) models, which
+    is a different question from yolo11-vs-yolo26: the two families should be
+    compared *within* a size class, and performance-vs-cost is read *across* them.
+    Prefer the measured ``gflops``/``params_m`` for plotting; this is the grouping.
+    """
+    stem = model.lower()
+    # Strip any architecture prefix so 'rfdetr-l' style names work too.
+    tail = stem.rsplit("-", 1)[-1] if "-" in stem else stem
+    letter = tail[-1] if tail and tail[-1] in _MODEL_SIZE_CLASSES else ""
+    if not letter:
+        # Fall back to the last size letter anywhere in the name.
+        for ch in reversed(stem):
+            if ch in _MODEL_SIZE_CLASSES:
+                letter = ch
+                break
+    return _MODEL_SIZE_CLASSES.get(letter)
+
+
+def is_small_model(model: str) -> bool:
+    """True for n/s models, False for m/l/x. Unknown names count as large."""
+    return model_size_class(model) in ("nano", "small")
+
+
 def torch_backend() -> str:
     """Detect whether the active PyTorch install is CUDA / CPU / etc."""
     if torch is None:
@@ -79,10 +111,30 @@ def current_vram_gb() -> float:
 
 
 def peek_vram_gb() -> float:
-    """Peak allocated VRAM in GiB, or 0.0 without CUDA."""
+    """Peak allocated VRAM in GiB, or 0.0 without CUDA.
+
+    NOTE: this only sees PyTorch's *caching allocator*, so it misses memory
+    allocated outside it (TensorRT engine weights, ONNX Runtime arenas). Prefer
+    ``device_vram_used_gb`` for cross-runtime comparisons.
+    """
     if torch is None or torch_backend() != "cuda":
         return 0.0
     return torch.cuda.max_memory_allocated() / (1024**3)
+
+
+def device_vram_used_gb() -> float:
+    """Device-wide VRAM currently in use, in GiB.
+
+    ``torch.cuda.max_memory_allocated`` only counts PyTorch's own allocations, so
+    it reports a near-zero footprint for the ``tensorrt`` and ``ort_*`` runtimes
+    (their weights live in TensorRT's / ORT's own allocators, outside torch).
+    Because total device memory is the metric this harness reports, query the
+    device directly: used = total - free.
+    """
+    if torch is None or torch_backend() != "cuda":
+        return 0.0
+    free_b, total_b = torch.cuda.mem_get_info()
+    return (total_b - free_b) / (1024**3)
 
 
 def reset_vram(track: bool = True) -> None:
@@ -127,17 +179,33 @@ def summarize(values: list[float]) -> dict[str, float]:
 
 
 def nvidia_gpu_name() -> str | None:
-    """GPU name from nvidia-smi, or None if unavailable."""
+    """GPU name via nvidia-smi, falling back to torch, or None if unavailable.
+
+    ``nvidia-smi`` fails on a driver/library version mismatch (common after a
+    driver update without a reboot) — it returns non-zero, or in some builds
+    prints the error to stdout with rc=0. Both are handled, and torch's own view
+    of the device is used as a fallback so the report can still name the GPU.
+    """
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    if out.returncode != 0:
-        return None
-    return out.stdout.strip().splitlines()[0]
+        out = None
+    if out is not None and out.returncode == 0:
+        lines = [l.strip() for l in out.stdout.strip().splitlines() if l.strip()]
+        # Guard against error text being printed to stdout (e.g. the NVML
+        # "Failed to initialize NVML" message) which is not a device name.
+        if lines and "nvml" not in lines[0].lower() and "failed" not in lines[0].lower():
+            return lines[0]
+
+    if torch is not None and torch_backend() == "cuda":
+        try:
+            return torch.cuda.get_device_name(0)
+        except Exception:  # pragma: no cover - defensive
+            return None
+    return None
 
 
 def detect_arch() -> str | None:
@@ -156,6 +224,11 @@ def tf32_enabled() -> bool:
 
 
 def env_summary() -> dict:
+    """Minimal environment block (kept for callers that want just the basics).
+
+    Prefer :func:`yolo_bench.env.fingerprint`, which adds CPU/RAM/OS/library
+    versions needed to compare results across machines.
+    """
     return {
         "gpu_name": nvidia_gpu_name(),
         "arch": detect_arch(),

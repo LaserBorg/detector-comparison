@@ -4,16 +4,24 @@ Paths are resolved relative to the repository root (the parent of this package)
 so the project can be moved to another machine (e.g. the RTX 3090 box) and
 re-run unchanged.
 
+Scope note
+----------
+This module holds *paths*, the *models under test*, and the shared *pre/post
+constants*. It deliberately does NOT hold the list of runtimes or which
+precisions each supports — that lives in ``runtimes/registry.py``, which is the
+single source of truth. Previously both modules carried a ``RUNTIMES`` list and
+they could drift apart; the aliases at the bottom of this file now derive from
+the registry so there is exactly one definition.
+
 Benchmark targets:
   * yolo11s / yolo11l / yolo26s / yolo26l  (COCO detection)
-  * precisions: fp32 / fp16
-  * runtimes:  pytorch | ort_cuda | ort_trt | tensorrt
+  * precisions: fp32 / fp16 (per-runtime support varies; see the registry)
+  * runtimes:   see ``runtimes/registry.py``
 
 NOTE on the GTX 960M (Maxwell, SM 5.0): TensorRT requires SM 7.5+ (and ONNX
 Runtime's TensorRT EP bundles TensorRT 8.6-10.x, which needs SM 7.0+). The
-960M therefore cannot run the `ort_trt` or `tensorrt` backends at all. This
-project targets RTX 3070 / 3090 (Ampere, SM 8.6) and Jetson Orin Nano
-(SM 8.7) where all four backends + FP16 tensor cores are available.
+960M therefore cannot run the TensorRT-backed backends at all. This project
+targets RTX 3070 / 3090 (Ampere, SM 8.6) and Jetson Orin Nano (SM 8.7).
 """
 
 from __future__ import annotations
@@ -28,8 +36,16 @@ RESULTS_DIR = ROOT / "results"    # csv + markdown (git-ignored)
 
 # --- Models under test -------------------------------------------------------
 MODELS = ["yolo11s", "yolo11l", "yolo26s", "yolo26l"]
+
+# --- Defaults for a run ------------------------------------------------------
+# The precision set offered by default. Individual runtimes may support less;
+# the registry (and ``runtimes.plan``) handles that, reporting unsupported
+# combinations as skips rather than failures.
 PRECISIONS = ["fp32", "fp16"]
-RUNTIMES = ["pytorch", "ort_cuda", "ort_trt", "tensorrt"]
+
+# Re-exported from the registry so existing callers keep working, while the
+# registry stays the single source of truth. Import inside the functions below /
+# at the bottom to avoid a circular import at module load.
 
 # --- Architecture registry ---------------------------------------------------
 # Maps a model (or family) to the detector architecture that knows its pre/post.
@@ -87,5 +103,40 @@ def model_engine(name: str, precision: str) -> Path:
     return MODELS_DIR / f"{name}.{precision}.engine"
 
 
+def model_openvino(name: str) -> Path:
+    """OpenVINO IR artifact for ``name``.
+
+    OpenVINO imports the ONNX directly, so this normally points at the same
+    ``.onnx`` the ORT runtimes consume (kept as a single accessor so a future
+    vectorized-IR pipeline can change in one place).
+    """
+    return MODELS_DIR / f"{name}.onnx"
+
+
 def model_meta(name: str) -> Path:
     return MODELS_DIR / f"{name}.meta.json"
+
+
+# --- Registry-derived aliases ------------------------------------------------
+# Kept for existing callers. The registry is authoritative; these are views of
+# it. ``ALL_RUNTIMES`` is every registered backend; ``RUNTIMES`` remains the
+# default *matrix* (CUDA backends first, then CPU baselines).
+def _runtimes_alias() -> list[str]:
+    from .runtimes.registry import ALL_KINDS
+
+    return list(ALL_KINDS)
+
+
+def __getattr__(name: str):
+    """Lazily expose registry-derived names without an import cycle.
+
+    ``config`` is imported by ``runtimes.registry``'s neighbours during package
+    init, so touching the registry at module scope would be circular.
+    """
+    if name == "RUNTIMES":
+        return _runtimes_alias()
+    if name == "OPENVINO_DEVICE":
+        import os
+
+        return os.environ.get("YOLO_BENCH_OPENVINO_DEVICE", "GPU")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

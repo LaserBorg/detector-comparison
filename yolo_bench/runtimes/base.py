@@ -26,8 +26,17 @@ class RuntimeExecutor(ABC):
 
     name: str = "base"
     on_gpu: bool = False
+    # Precisions this backend can genuinely execute. CPU backends have no FP16
+    # kernels, so 'fp16' there would silently run an FP32 graph and be
+    # mislabelled — better to refuse than to report a wrong number.
+    supported_precisions: tuple[str, ...] = ("fp32", "fp16")
 
     def __init__(self, precision: str):
+        if precision not in self.supported_precisions:
+            raise ValueError(
+                f"Runtime '{self.name}' does not support precision '{precision}' "
+                f"(supported: {', '.join(self.supported_precisions)})."
+            )
         self.precision = precision
         self._artifact_mb = 0.0
 
@@ -48,6 +57,16 @@ class RuntimeExecutor(ABC):
     def artifact_mb(self) -> float:
         """Size on disk / host of the loaded artifact, in megabytes."""
         return self._artifact_mb
+
+    @property
+    def runtime_version(self) -> str | None:
+        """Version of the library doing the forward pass.
+
+        Recorded per row because different runtimes resolve to different stacks
+        (TensorRT 11.3 on the 3090 vs 10.16 on the Orin), so a single
+        environment-level version would be ambiguous when reading a row.
+        """
+        return None
 
     def _track_artifact(self, artifact) -> None:
         """Record the artifact's on-disk size when it's a file path."""

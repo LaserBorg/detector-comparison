@@ -181,7 +181,7 @@ class YoloArchitecture(Architecture):
         from ultralytics import YOLO
 
         # Strict FP32: disable TF32 so "fp32" is genuinely 32-bit math, matching
-        # what onnx/trtexec --noTF32 produce for a fair compare.
+        # what the ONNX graph / --noTF32 engine builds produce for a fair compare.
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.allow_tf32 = False

@@ -28,7 +28,13 @@ import numpy as np
 
 from . import config
 from .archs import create_arch
-from .runtimes import create_runtime
+from .runtimes import (
+    ARTIFACT_ENGINE,
+    ARTIFACT_ONNX,
+    ARTIFACT_TORCH_RUNNER,
+    create_runtime,
+    spec_for,
+)
 from .utils import torch_device
 
 
@@ -78,25 +84,44 @@ class Detector:
     def weights_mb(self) -> float:
         return self._weights_mb
 
+    @property
+    def runtime_version(self) -> str | None:
+        """Version of the library performing the forward pass (per-runtime)."""
+        return self._rt.runtime_version
+
     # -- lifecycle -----------------------------------------------------------
 
     def load(self) -> None:
-        """Resolve the architecture-appropriate artifact and hand it to the runtime."""
+        """Resolve the architecture-appropriate artifact and hand it to the runtime.
+
+        The registry spec says *which kind* of artifact this backend needs; the
+        architecture says *where* that artifact lives. Joining the two is all the
+        wrapper has to do, so there is no per-runtime branching here.
+        """
         if self._device is None:
             self._device = torch_device()
 
         kind = self._rt.name
-        if kind == "pytorch":
-            artifact = self._arch.torch_runner(self.model, self._device, self.precision)
+        spec = spec_for(kind)
+
+        if spec.artifact == ARTIFACT_TORCH_RUNNER:
+            # CPU backends must get a CPU device, or the runner would move the
+            # tensors to CUDA while reporting itself as a CPU baseline.
+            import torch  # lazy: keeps this module importable without PyTorch
+
+            device = self._device if spec.on_gpu else torch.device("cpu")
+            artifact = self._arch.torch_runner(self.model, device, self.precision)
             weights_path = self._arch.checkpoint_path(self.model)
-        elif kind in ("ort_cuda", "ort_trt"):
+        elif spec.artifact == ARTIFACT_ONNX:
             artifact = self._arch.onnx_path(self.model)
             weights_path = artifact
-        elif kind == "tensorrt":
+        elif spec.artifact == ARTIFACT_ENGINE:
             artifact = self._arch.engine_path(self.model, self.precision)
             weights_path = artifact
-        else:
-            raise ValueError(f"Unknown runtime kind: {kind!r}")
+        else:  # pragma: no cover - registry guarantees the set
+            raise ValueError(
+                f"Runtime '{kind}' declares unknown artifact kind {spec.artifact!r}"
+            )
 
         self._rt.load(artifact)
         if isinstance(weights_path, Path) and weights_path.exists():

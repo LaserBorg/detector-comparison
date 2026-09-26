@@ -1,171 +1,194 @@
-"""Comparison driver: run the full matrix and emit CSV + Markdown.
+"""CLI for a full matrix run: ``python -m yolo_bench compare ...``.
 
-Runs every (runtime x precision x model) combination against the same mp4 and
-writes a combined results table grouping the three metrics (framerate, latency,
-memory). Run on the target GPU (the RTX 3090) for meaningful numbers.
-
-Usage
------
-  python -m yolo_bench.compare --video data/sample.mp4 --frames 100 \
-      --models yolo11s yolo11l yolo26s yolo26l \
-      --runtimes pytorch ort_cuda ort_trt tensorrt --precisions fp32 fp16
-
-  # limits (subset for a quick smoke test):
-  python -m yolo_bench.compare --video data/sample.mp4 --frames 30 \
-      --models yolo11s --runtimes pytorch --precisions fp32
+Thin wrapper over :mod:`yolo_bench.orchestrate` — the orchestration logic lives
+there so the notebook and this CLI cannot drift apart. Use ``--experiment`` to
+run a named setup instead of spelling out the matrix.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from pathlib import Path
 
-from . import config
-from .bench import run_benchmark
-
-_FIELDS = [
-    "architecture", "runtime", "precision", "model", "frames",
-    "e2e_ms", "e2e_med_ms", "e2e_p95_ms",
-    "infer_ms", "infer_med_ms", "infer_p95_ms",
-    "pre_ms", "post_ms", "fps",
-    "peak_vram_gb", "host_rss_mb", "weights_mb",
-    "gpu_name", "arch", "torch", "torch_backend", "tf32_on",
-]
-
-
-def _combos(models, runtimes, precisions):
-    out = []
-    # Stable, predictable order: model-major, then precision, then runtime.
-    for model in models:
-        for precision in precisions:
-            for runtime in runtimes:
-                out.append((runtime, precision, model))
-    return out
-
-
-def _nan_row(runtime, precision, model):
-    return {
-        "architecture": config.arch_for(model), "runtime": runtime,
-        "precision": precision, "model": model, "frames": 0,
-        "e2e_ms": float("nan"), "e2e_med_ms": float("nan"),
-        "e2e_p95_ms": float("nan"), "infer_ms": float("nan"),
-        "infer_med_ms": float("nan"), "infer_p95_ms": float("nan"),
-        "pre_ms": float("nan"), "post_ms": float("nan"),
-        "fps": float("nan"), "peak_vram_gb": float("nan"),
-        "host_rss_mb": float("nan"), "weights_mb": float("nan"),
-        "gpu_name": None, "arch": None, "torch": None,
-        "torch_backend": None, "tf32_on": None,
-    }
-
-
-def _run_one(runtime, precision, model, video, frames, warmup, conf, iou):
-    try:
-        return run_benchmark(
-            runtime, precision, model, video,
-            frames=frames, warmup=warmup, conf=conf, iou=iou,
-        )
-    except Exception as exc:  # noqa: BLE001 - keep going, record the failure
-        print(f"[compare] FAILED {model} {runtime} {precision}: {exc}",
-              file=sys.stderr)
-        return _nan_row(runtime, precision, model)
-
-
-def _write_csv(rows: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        for r in rows:
-            writer.writerow(r)
-
-
-def _ms(v) -> str:
-    if v is None or v != v:  # NaN
-        return "-"
-    return f"{v:7.2f}"
-
-
-def _write_md(rows: list[dict], path: Path) -> None:
-    """Markdown: one table per model, rows = runtime x precision."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    header = [
-        "# YOLO inference benchmark",
-        "",
-    ]
-    if rows:
-        header.append(f"- GPU: `{rows[0]['gpu_name']}` (arch {rows[0]['arch']})")
-        header.append(f"- Frames: {rows[0]['frames']}")
-    header += [
-        "- `fps` = throughput (sustained); higher is better",
-        "- `e2e_ms` / `e2e_p95_ms` = full-frame latency (mean / p95); lower is better",
-        "- `infer_ms` = raw forward pass only",
-        "- `vram_gb` / `rss_mb` / `weights_mb` = memory footprint",
-        "",
-    ]
-    lines = [l for l in header if l != ""]
-
-    models = sorted({r["model"] for r in rows})
-    runtimes = config.RUNTIMES
-    precisions = config.PRECISIONS
-
-    for model in models:
-        lines.append(f"## {model}")
-        lines.append("")
-        lines.append("| runtime | precision | fps | e2e_ms | e2e_p95 | infer_ms | vram_gb | rss_mb | weights_mb |")
-        lines.append("|---|---|---|---|---|---|---|---|---|")
-        for runtime in runtimes:
-            for precision in precisions:
-                r = next(
-                    (x for x in rows
-                     if x["model"] == model and x["runtime"] == runtime
-                     and x["precision"] == precision), None)
-                if r is None:
-                    continue
-                lines.append(
-                    f"| {runtime} | {precision} | {r['fps']:7.1f} | "
-                    f"{_ms(r['e2e_ms'])} | {_ms(r['e2e_p95_ms'])} | "
-                    f"{_ms(r['infer_ms'])} | {r['peak_vram_gb']:7.2f} | "
-                    f"{r['host_rss_mb']:7.0f} | {r['weights_mb']:7.1f} |"
-                )
-        lines.append("")
-
-    path.write_text("\n".join(lines) + "\n")
+from . import config, orchestrate
+from .runtimes import ALL_KINDS, CPU_KINDS, CUDA_KINDS
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="Run the full YOLO benchmark matrix")
-    p.add_argument("--video", required=True)
-    p.add_argument("--models", nargs="+", default=config.MODELS)
-    p.add_argument("--runtimes", nargs="+", default=config.RUNTIMES)
-    p.add_argument("--precisions", nargs="+", default=config.PRECISIONS)
-    p.add_argument("--frames", type=int, default=None)
+    p = argparse.ArgumentParser(
+        description="Run a detector benchmark matrix → CSV + Markdown",
+        epilog="Runtimes: " + ", ".join(ALL_KINDS),
+    )
+    p.add_argument("--video", default=None,
+                   help="mp4 to read (default: data/sample_1080p_h264.mp4)")
+    p.add_argument("--models", nargs="+", default=None,
+                   help="models to test (default: all in config.MODELS)")
+    p.add_argument("--runtimes", nargs="+", default=None,
+                   help="runtimes to test (default: all registered)")
+    p.add_argument("--precisions", nargs="+", default=None,
+                   help="fp32 and/or fp16 (default: both; runtime support varies)")
+    p.add_argument("--frames", type=int, default=None, help="cap frames per config")
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument("--conf", type=float, default=config.CONF)
     p.add_argument("--iou", type=float, default=config.IOU)
-    p.add_argument("--out", type=Path, default=None,
-                   help="base name for results (default: results/compare)")
+    p.add_argument("--out", type=str, default=None,
+                   help="output prefix (default: results/compare)")
+    p.add_argument("--experiment", choices=orchestrate.experiment_names(),
+                   default=None,
+                   help="run a named setup from orchestrate.EXPERIMENTS")
+    p.add_argument("--group", choices=("all", "cuda", "cpu"), default="all",
+                   help="restrict to a runtime group (ignored with --experiment)")
+    p.add_argument("--no-isolate", action="store_true",
+                   help="run every config in ONE process (faster, but host RSS "
+                        "accumulates and memory numbers become meaningless)")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel configs; keep 1 for GPU matrices")
+    p.add_argument("--list-runtimes", action="store_true",
+                   help="show the runtime registry and exit")
+    p.add_argument("--list-experiments", action="store_true",
+                   help="show the named experiments and exit")
     args = p.parse_args(argv)
 
-    out_base = args.out or (config.RESULTS_DIR / "compare")
-    csv_path = out_base.with_suffix(".csv")
-    md_path = out_base.with_suffix(".md")
+    if args.list_runtimes:
+        from .runtimes import describe
 
-    combos = _combos(args.models, args.runtimes, args.precisions)
-    rows = []
-    total = len(combos)
-    for i, (runtime, precision, model) in enumerate(combos, 1):
-        print(f"[compare] ({i}/{total}) {model} {runtime} {precision}", flush=True)
-        rows.append(_run_one(runtime, precision, model, Path(args.video),
-                             args.frames, args.warmup, args.conf, args.iou))
+        print(describe())
+        return 0
+    if args.list_experiments:
+        for name in orchestrate.experiment_names():
+            exp = orchestrate.EXPERIMENTS[name]
+            print(f"{name}")
+            print(f"    {exp.description}")
+            print(f"    models={list(exp.models)}")
+            print(f"    runtimes={list(exp.runtimes)} "
+                  f"precisions={list(exp.precisions)} frames={exp.frames}")
+        return 0
 
-    _write_csv(rows, csv_path)
-    if rows and rows[0].get("gpu_name") is not None:
-        _write_md(rows, md_path)
+    runtimes = args.runtimes
+    if runtimes is None:
+        runtimes = {"all": ALL_KINDS, "cuda": CUDA_KINDS, "cpu": CPU_KINDS}[args.group]
+        runtimes = list(runtimes)
 
-    print(f"[compare] wrote {csv_path}" + (f" and {md_path}" if md_path.exists() else ""))
+    out_base = args.out or str(config.RESULTS_DIR / "compare")
+
+    common = dict(
+        video=args.video, frames=args.frames, warmup=args.warmup,
+        conf=args.conf, iou=args.iou,
+        isolate=not args.no_isolate, max_workers=args.workers,
+    )
+    if args.experiment:
+        job = orchestrate.submit_experiment(args.experiment, **common)
+    else:
+        job = orchestrate.submit(
+            models=args.models or list(config.MODELS),
+            runtimes=runtimes,
+            precisions=args.precisions or list(config.PRECISIONS),
+            **common,
+        )
+
+    orchestrate._print_progress(job)
+    if not job.rows:
+        print("[compare] nothing ran", file=sys.stderr)
+        return 2
+
+    csv_path = orchestrate.write_csv(job.rows, out_base + ".csv")
+    md_path = _write_md(job.rows, out_base + ".md")
+    print(f"[compare] wrote {csv_path} and {md_path}")
+
+    failed = [r for r in job.rows if r["status"] == "failed"]
+    if failed:
+        print(f"[compare] {len(failed)} configuration(s) failed:", file=sys.stderr)
+        for r in failed:
+            print(f"  {r['model']} {r['runtime']} {r['precision']}: {r['error']}",
+                  file=sys.stderr)
     return 0
+
+
+def _fmt(value, width=7, places=2) -> str:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return " " * width
+    if f != f:  # NaN
+        return " " * width
+    return f"{f:{width}.{places}f}"
+
+
+def _write_md(rows: list[dict], path: str) -> str:
+    """Markdown report: one table per model, plus a skipped-configuration list."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    out: list[str] = ["# Detector benchmark report", ""]
+    env = next((r for r in rows if r["status"] == "ok"), None)
+    if env:
+        # Machine identity first: these results get merged across an RTX 3090,
+        # an RTX 3070 and a Jetson Orin Nano, so a row's hardware must be
+        # visible without cross-referencing the README.
+        cores = env.get("cpu_cores")
+        threads = env.get("cpu_threads")
+        core_txt = f"{cores}c/{threads}t" if cores else f"{threads}t"
+        out += [
+            f"- **host**: `{env.get('hostname')}` [{env.get('machine')}] — "
+            f"`{env.get('os_name')}` (kernel {env.get('kernel')})",
+            f"- **cpu**: {env.get('cpu')} [{core_txt}, "
+            f"{env.get('host_ram_gb')} GB RAM]",
+            f"- **gpu**: {env.get('gpu_name')} ({env.get('gpu_arch')}, "
+            f"SM {env.get('gpu_cc')}, {env.get('gpu_vram_gb')} GB), "
+            f"driver {env.get('gpu_driver')}",
+            f"- **stack**: CUDA {env.get('cuda')} / cuDNN {env.get('cudnn')}, "
+            f"TensorRT {env.get('tensorrt')}, ONNX Runtime "
+            f"{env.get('onnxruntime')}, torch {env.get('torch')} "
+            f"({env.get('torch_backend')})",
+        ]
+        if env.get("is_jetson"):
+            out.append(
+                f"- **jetson**: L4T {env.get('l4t')}, "
+                f"power mode `{env.get('nvpmodel')}`"
+            )
+        out += [
+            f"- run: `{env.get('run_id')}` at {env.get('timestamp')}",
+            "",
+        ]
+    out += [
+        "- `fps` = throughput (higher is better); `e2e_ms` = full frame loop; "
+        "`infer_ms` = raw forward pass only",
+        "- `vram_gb` = device-wide peak; `weights_mb` = artifact on disk",
+        "",
+    ]
+
+    models = sorted({r["model"] for r in rows}, key=str)
+    for model in models:
+        sub = [r for r in rows if r["model"] == model]
+        skipped = [r for r in sub if r["status"] == "skipped"]
+        out += [f"## {model}", ""]
+        out += [
+            "| runtime | precision | fps | e2e_ms | e2e_p95 | infer_ms | "
+            "vram_gb | weights_mb |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for r in sub:
+            if r["status"] == "ok":
+                out.append(
+                    f"| {r['runtime']} | {r['precision']} | {_fmt(r['fps'])} | "
+                    f"{_fmt(r['e2e_ms'])} | {_fmt(r['e2e_p95_ms'])} | "
+                    f"{_fmt(r['infer_ms'])} | {_fmt(r['peak_vram_gb'], 7)} | "
+                    f"{_fmt(r['weights_mb'], 8, 1)} |"
+                )
+            else:
+                out.append(
+                    f"| {r['runtime']} | {r['precision']} | — | — | — | — | — | — |"
+                )
+        out.append("")
+        if skipped:
+            out += ["Skipped in this matrix:", ""]
+            for r in skipped:
+                out.append(f"- `{r['runtime']}` {r['precision']}: {r['error']}")
+            out.append("")
+
+    p.write_text("\n".join(out) + "\n")
+    return str(p)
 
 
 if __name__ == "__main__":
