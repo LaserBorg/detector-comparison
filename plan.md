@@ -89,7 +89,7 @@ per device is the safest default; `--hw-compatible` is a future option.)
 - [x] `bench.py` (fps + latency + memory) / `compare.py` / `check.py`
 - [x] `README.md`, requirements, .gitignore
 - [x] **Run on RTX 3090 host** — conversion + correctness + full 56-combo matrix
-      (see README "Measured results"; raw data in `results/final.csv`)
+      (see `results.ipynb`; canonical data in `results/rtx3090.csv`)
 - [ ] Rebuild engines + re-run on **3070** and **Orin Nano** (JetPack **7.2**)
 - [ ] Implement RF-DETR pre/post in `archs/rfdetr.py` (later phase)
 

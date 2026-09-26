@@ -89,15 +89,18 @@ python -m yolo_bench export --models yolo11s yolo11l yolo26s yolo26l \
 # 5. Correctness gate (backends must match ultralytics .predict())
 python -m yolo_bench check --image data/bus.jpg --model yolo11s --all
 
-# 6. Benchmark the full matrix
+# 6. Benchmark the full matrix, writing the canonical per-machine CSV.
+#    <tag> is the machine name (rtx3090, rtx3070, orin-nano, ...); commit the pair.
 python -m yolo_bench compare --video data/sample_1080p_h264.mp4 --frames 100 \
     --models yolo11s yolo11l yolo26s yolo26l \
     --runtimes pytorch ort_cuda tensorrt openvino \
-               pytorch_cpu ort_cpu openvino_cpu --precisions fp32 fp16
+               pytorch_cpu ort_cpu openvino_cpu --precisions fp32 fp16 \
+    --out results/rtx3090
 ```
 
-Results land in `results/compare.csv` and `results/compare.md` (or under the
-`--out` prefix you pass). The tables below were produced with `--out results/final`.
+Results land in `results/rtx3090.csv` + `results/rtx3090.md` (or under whatever
+`--out` prefix you pass). The CSV is the single source of truth for that
+machine; `results.ipynb` reads it to draw the charts and write `insights.md`.
 
 ## Two layers: inference vs. harness
 
@@ -162,31 +165,26 @@ identical in a merged CSV.
 
 ## Notebook workflow
 
-`results.ipynb` runs experiments and draws the charts. Cells:
+`results.ipynb` is the reader for the per-machine CSVs. It auto-discovers every
+`results/*.csv` (filename stem = machine tag), so a new machine's CSV needs no
+code change. The cells, in order:
 
 1. environment fingerprint of the machine you are on,
-2. list the named experiments (`orchestrate.EXPERIMENTS`),
-3. a cheap `smoke` probe, then a full matrix,
-4. **`fps` nested bars** — outer bar FP32, inner bar FP16 inset per model,
-5. grouped bars and a log-scale speedup chart,
-6. cross-machine comparison from merged `results/*.csv`.
+2. the named experiments (`orchestrate.EXPERIMENTS`) and the runtime registry,
+3. a cheap `smoke` probe (throwaway — it does **not** write to `results/`),
+4. **load** every `results/*.csv`, tagged by machine,
+5. one machine header per source,
+6. **Q1 — runtime comparison**: a slope chart + a ranking heatmap, *per machine*,
+7. **Q2 — performance vs model cost**: a GFLOPs-vs-fps scatter, *per machine*,
+8. **Q3 — quantization advantage**: an FP16/FP32 fps-ratio heatmap, *per machine*,
+9. **Q4 — GPU comparison**: the cross-machine chart (the one question that mixes
+   machines on purpose), plus a pivot table,
+10. **insights**: derives a short markdown report and writes `results/insights.md`.
 
-Reading the nested chart: the **wide** bar is FP32 and the **narrow** bar laid over
-it is FP16. When FP16 is faster the narrow bar pokes *out of the top* of the wide
-one; when FP16 is slower it sits *entirely inside* it. Either way the visible
-difference is directly the FP16 effect, and a gap means the combination was
-skipped. Cells are labelled `FP32→FP16` fps.
-
-That geometry is deliberate. The obvious alternative — two full-width bars on top
-of each other — fails in the one case that matters: whenever FP16 wins, the inner
-bar covers the outer one completely, so "FP16 much faster" and "FP16 exactly equal"
-render identically. Making the inner bar narrow keeps the taller/shorter
-relationship readable in both directions, and the bars are scaled as a quotient of
-the cell maximum so their ratio is preserved.
-
-A grouped-bar chart and a relative-speed chart are provided as companions, because
-nesting hides part of a bar and is therefore a poor way to answer "which runtime
-wins for this model?" (see `plots.fps_grouped_bars`, `plots.speedup_vs_reference`).
+Q1–Q3 are deliberately **per machine** — the ranking and the FP16 gain are
+properties of the hardware, so averaging two machines would produce a number that
+is neither one's real measurement. Q4 is the exception: comparing GPUs *is* its
+question, so it merges all machines (solid = one GPU, dashed = the other).
 
 ## Commands
 
@@ -287,17 +285,51 @@ compare detections with the `check` command.
 ## Moving to another machine (3070 / 3090 / Orin Nano)
 
 1. `git clone` (this repo) + recreate the environment from `requirements.txt`.
-2. Copy the **`.pt` checkpoints and the sample clip** (`data/sample_1080p_h264.mp4`)
-   (not the `.engine`/`.onnx` — they are arch/version-bound and will be rebuilt).
-3. Re-run `export` **on the target device** and then `check`/`compare`.
+2. Copy the **`.pt` checkpoints, the `.onnx` files, the `.meta.json`, and the
+   sample clip** (`data/sample_1080p_h264.mp4`). **Do not copy the `.engine`
+   files** — they are the only arch/TRT-version-bound artifacts and are rebuilt
+   on the target. ONNX is a portable IR, so the `.onnx` (and `.pt`) travel
+   freely between machines:
+
+   ```bash
+   scp models/*.pt models/*.onnx models/*.meta.json user@target:~/detector-comparison/models/
+   scp data/sample_1080p_h264.mp4 user@target:~/detector-comparison/data/
+   ```
+
+   The `.fp16.onnx` files (ModelOpt AutoCast) are only consumed by **TRT ≥ 11**;
+   on a TRT 10 target (e.g. JetPack 7.2) the FP16 engine is built from the plain
+   `.onnx` with `BuilderFlag.FP16`, so they are optional there.
+3. Re-run `export --onnx-only` **on the target device** to build the engines,
+   then `check`, then `compare --out results/<tag>` (e.g. `--out
+   results/orin-nano`) so the run lands in that machine's canonical CSV. Commit
+   the `<tag>.csv` + `<tag>.md` pair; the notebook picks it up automatically.
 4. On **Orin Nano** (JetPack 7.2, arm64): the compute stack is now unified with
    Thor — **L4T Ubuntu 24.04, kernel 6.8, CUDA 13.2.2, TensorRT 10.16.2** — so
-   JetPack's own TensorRT, `trtexec` (at `/usr/src/tensorrt/bin/trtexec`) and
-   Python bindings are the supported path; you no longer need a pip `tensorrt`
-   wheel. Install `onnxruntime-gpu` from the Jetson Zoo build (there is no
-   generic aarch64 wheel), and note that since CUDA 13.x matches the host, a
-   `torch` built for CUDA 13.x is the closest match (Jetson-specific torch wheels
-   come from the Jetson Zoo / NVIDIA containers). With JetPack 7.2 there is no SD
+   JetPack's own TensorRT is the supported path; you do **not** need a pip
+   `tensorrt` wheel. The C++ runtime (`libnvinfer10`) ships with JetPack, but the
+   **Python bindings are a separate package** and `trtexec` is not installed by
+   default:
+
+   ```bash
+   sudo apt-get install python3-libnvinfer   # Python bindings for the system TRT
+   ```
+
+   This only adds the Python layer on top of the existing `libnvinfer.so.10` —
+   it does not upgrade or replace the C++ runtime, so other NVInfer projects on
+   the box (e.g. DeepStream apps) are unaffected. If you work in a **conda env**,
+   the apt package lands in system `dist-packages`, which conda does not see —
+   symlink it in (it links against the system `libnvinfer.so.10`):
+
+   ```bash
+   SP=$(python -c 'import site; print(site.getsitepackages()[0])')
+   ln -s /usr/lib/python3.12/dist-packages/tensorrt $SP/tensorrt
+   ln -s /usr/lib/python3.12/dist-packages/tensorrt_bindings $SP/tensorrt_bindings
+   ```
+
+   Install `onnxruntime-gpu` from the Jetson Zoo build (there is no generic
+   aarch64 wheel), and note that since CUDA 13.x matches the host, a `torch`
+   built for CUDA 13.x is the closest match (Jetson-specific torch wheels come
+   from the Jetson Zoo / NVIDIA containers). With JetPack 7.2 there is no SD
    card image for the Orin Nano Dev Kit — flash via the unified ISO.
 
 ### Merging results across machines
@@ -330,145 +362,41 @@ Three caveats when comparing across machines:
   number (6-core Cortex-A78AE, 7–15 W) and will differ hugely from this desktop
   i7-6700K. That is the metric doing its job, not noise.
 
-## Measured results
+## Results: single source of truth
 
-**Host:** RTX 3090 (SM 8.6), i7-6700K (4c/8t), CUDA 13.0, TensorRT 11.3.0.99,
-torch 2.14.0+cu130, ONNX Runtime 1.30.0, OpenVINO 2026.4.
-**Workload:** 100 frames of `data/sample_1080p_h264.mp4` (1920×1080), 50-frame
-warm-up, `conf=0.25`, `iou=0.45`. All timings CUDA-synchronized.
-Raw data: `results/final.csv`.
+There is exactly **one canonical CSV per machine** in `results/`, named by machine
+tag: `results/rtx3090.csv`, `results/orin-nano.csv` (and later `results/rtx3070.csv`, …).
+Each machine runs `compare --out results/<tag>` and commits its own pair
+(`<tag>.csv` + the auto-generated `<tag>.md`). These CSVs are the **only** place
+raw numbers live — they are fingerprinted per row (GPU, driver, library versions,
+`nvpmodel`, …) so a merged set stays unambiguous.
 
-> **These numbers are host-specific.** Absolute values move with GPU, driver,
-> TensorRT version and clock state; the *ordering* is the transferable result.
+Everything else is **derived** from those CSVs and is not committed:
 
-### Framerate — `fps` (higher is better)
+- **`results.ipynb`** loads every `results/*.csv` (the filename stem is the machine
+  tag), draws the charts, and writes a short `results/insights.md`. Run it to see
+  the figures and the findings; it needs no code change when a new machine's CSV
+  lands.
+- **`results/insights.md`** — regenerated by the notebook on each run (gitignored).
 
-| runtime | prec | yolo11s | yolo11l | yolo26s | yolo26l |
-|---|---|---|---|---|---|
-| **tensorrt** | fp32 | 138.6 | 84.7 | 139.9 | 85.4 |
-| **tensorrt** | **fp16** | **170.0** | **138.4** | **176.8** | **143.6** |
-| ort_cuda | fp32 | 134.9 | 78.8 | 127.4 | 79.7 |
-| ort_cuda | fp16 | 135.3 | 79.1 | 131.8 | 79.6 |
-| pytorch | fp32 | 82.2 | 51.4 | 65.6 | 46.8 |
-| pytorch | fp16 | 71.3 | 42.9 | 54.6 | 40.9 |
-| openvino | fp32 | 32.6 | 9.4 | 32.6 | 9.4 |
-| openvino | fp16 | 32.7 | 9.4 | 32.8 | 9.5 |
-| openvino_cpu | fp32 | 12.5 | 3.5 | 13.3 | 3.5 |
-| ort_cpu | fp32 | 11.8 | 3.6 | 13.5 | 2.4 |
-| pytorch_cpu | fp32 | 7.6 | 2.6 | 7.7 | 2.4 |
-| ort_trt | fp32/fp16 | — ᵃ | — ᵃ | — ᵃ | — ᵃ |
+> **Numbers are host-specific.** Absolute values move with GPU, driver, TensorRT
+> version and clock state; the *ordering* is the transferable result. Cross-machine
+> `tensorrt`/`ort_trt` rows are not version-comparable (TRT 11 vs 10) — see the
+> caveats in "Moving to another machine".
 
-### Latency — `e2e_ms` (full loop, mean) / `infer_ms` (raw forward) (lower is better)
-
-| runtime | prec | yolo11s | yolo11l | yolo26s | yolo26l |
-|---|---|---|---|---|---|
-| **tensorrt** | fp32 | 7.21 / 4.10 | 11.81 / 8.77 | 7.15 / 4.19 | 11.71 / 8.69 |
-| **tensorrt** | **fp16** | **5.88 / 2.67** | **7.23 / 4.05** | **5.66 / 2.68** | **6.97 / 3.95** |
-| ort_cuda | fp32 | 7.41 / 4.47 | 12.69 / 9.67 | 7.85 / 4.75 | 12.55 / 9.53 |
-| ort_cuda | fp16 | 7.39 / 4.46 | 12.64 / 9.64 | 7.59 / 4.62 | 12.57 / 9.48 |
-| pytorch | fp32 | 12.17 / 9.19 | 19.45 / 16.43 | 15.25 / 12.22 | 21.38 / 18.25 |
-| pytorch | fp16 | 14.02 / 11.06 | 23.29 / 20.26 | 18.32 / 15.29 | 24.43 / 21.37 |
-| openvino | fp32 | 30.70 / 27.95 | 106.34 / 103.50 | 30.65 / 27.80 | 106.72 / 103.83 |
-| openvino | fp16 | 30.61 / 27.90 | 105.91 / 103.00 | 30.48 / 27.68 | 105.71 / 102.82 |
-| openvino_cpu | fp32 | 79.86 / 77.00 | 288.70 / 285.70 | 75.39 / 72.39 | 286.48 / 283.44 |
-| ort_cpu | fp32 | 84.48 / 81.46 | 276.02 / 273.02 | 73.92 / 70.93 | 412.21 / 408.40 |
-| pytorch_cpu | fp32 | 131.99 / 129.02 | 390.79 / 387.77 | 129.54 / 126.69 | 423.04 / 419.99 |
-| ort_trt | fp32/fp16 | — ᵃ | — ᵃ | — ᵃ | — ᵃ |
-
-### Tail latency — `e2e_p95_ms` (lower is better)
-
-| runtime | prec | yolo11s | yolo11l | yolo26s | yolo26l |
-|---|---|---|---|---|---|
-| **tensorrt** | fp32 | 8.53 | 12.06 | 7.22 | 11.94 |
-| **tensorrt** | **fp16** | 7.72 | 8.67 | 5.76 | 7.04 |
-| ort_cuda | fp32 | 7.47 | 12.80 | 9.31 | 12.66 |
-| ort_cuda | fp16 | 7.45 | 12.73 | 7.68 | 13.14 |
-| pytorch | fp32 | 12.26 | 19.83 | 15.38 | 24.30 |
-| pytorch | fp16 | 14.12 | 23.40 | 20.69 | 24.60 |
-| openvino | fp32 | 31.08 | 106.78 | 31.11 | 107.21 |
-| openvino | fp16 | 31.04 | 106.52 | 30.96 | 106.18 |
-| openvino_cpu | fp32 | 103.53 | 302.81 | 82.54 | 300.91 |
-| ort_cpu | fp32 | 108.12 | 295.79 | 80.03 | 415.69 |
-| pytorch_cpu | fp32 | 174.52 | 416.84 | 138.70 | 464.51 |
-
-Note the tail behaviour on `tensorrt fp16` for the **S** models (`7.72` ms vs a
-`5.88` ms mean, and `8.67` vs `7.23` for `yolo11l`): the p95 is inflated relative
-to the mean, i.e. a few slow frames drag the tail. The mean-based `fps` is
-unaffected, but for a latency-sensitive pipeline use the p95, not the mean.
-
-### Memory — `peak_vram_gb` (device) and `weights_mb` (artifact on disk)
-
-| runtime | prec | vram s | vram l | weights s | weights l |
-|---|---|---|---|---|---|
-| pytorch | fp32 / fp16 | 0.55 / 0.84 | 1.04 / 0.95 | 19.3 / 20.4 ᵇ | 51.4 / 53.2 ᵇ |
-| ort_cuda | fp32 / fp16 | 0.74 / 1.09 | 1.34 / 1.34 | 38.1 / 38.3 | 101.7 / 99.6 |
-| **tensorrt** | fp32 / **fp16** | 0.73 / **0.95** | 1.25 / **1.06** | 225.2 / **131.0** | 383.0 / **232.6** |
-| openvino | fp32 / fp16 | 0.94 / 0.95 | 1.15 / 1.15 | 38.1 / 38.3 | 101.7 / 99.6 |
-| pytorch_cpu | fp32 | 0.77 ᶜ | 0.78 ᶜ | 19.3 | 51.4 |
-| ort_cpu | fp32 | 0.77 ᶜ | 0.78 ᶜ | 38.1 | 101.7 |
-| openvino_cpu | fp32 | 0.77 ᶜ | 0.78 ᶜ | 38.1 | 99.6 |
-
-<sub>
-ᵃ **`ort_trt` could not run on this host.** ONNX Runtime 1.30.0's TensorRT EP links
-against `libnvinfer.so.10` (TensorRT 10); this machine has TensorRT 11.3
-(`libnvinfer.so.11`) and `libnvinfer.so.10` is absent. The EP fails to load and ORT
-would silently fall back to the CUDA EP, so yolo_bench refuses the row instead of
-reporting a mislabelled number. Fix by installing TensorRT 10 in a separate env.
-ᵇ `weights_mb` is precision-independent for `pytorch` (`.pt`) and
-`ort_*`/`openvino` (`.onnx`); the s/l pair shown is yolo11/yolo26 size.
-ᶜ The `*_cpu` rows use no device memory, so their `peak_vram_gb` is just the
-ambient baseline of the process (≈0.77 GB) plus other processes on the shared GPU —
-it is not a footprint of the model.
-</sub>
-
-### What the numbers show
-
-1. **`tensorrt fp16` wins on every model.** 170–177 fps (S) and 138–144 fps (L),
-   i.e. **1.2–1.7× over `tensorrt fp32`** and **~2.1× over eager PyTorch fp32**.
-   Its `infer_ms` roughly halves (4.10 → 2.67 ms for S): that is the Ampere
-   tensor-core win.
-2. **`yolo26` ≈ `yolo11` at equal size**, with `yolo26` marginally ahead on the
-   S models (170.0 → 176.8 fps fp16) and level on L (138.4 vs 143.6). The
-   rewritten head is not slower.
-3. **FP16 helps only where the tensor cores are actually used.** `tensorrt` improves
-   sharply; `ort_cuda` barely moves (4.47 → 4.46 ms) because the CUDA EP has no
-   tensor-core FP16 path here; **eager PyTorch gets slower** (9.19 → 11.06 ms) — at
-   9.4 GFLOPs the model is latency-bound, so cast/launch overhead exceeds the FLOP
-   saving. Do not assume "fp16 = faster".
-4. **FP16 cuts the artifact roughly in half**: a `yolo11s` engine drops
-   225 MB → 131 MB. Checkpoint `.pt` (19 MB) and `.onnx` (38 MB) are FP32-only.
-5. **`openvino` on this NVIDIA GPU is 5× slower than `ort_cuda`.** OpenVINO 2026.4
-   does expose the 3090 as its `GPU` device, but it does not use the TensorRT
-   kernels, and it scales badly with model size (33 fps → 9.4 fps from S to L). Its
-   `INFERENCE_PRECISION_HINT` (f32 vs f16) makes no measurable difference. Use it as
-   a vendor-neutral reference point, not as a CUDA competitor; the plugin's real
-   purpose is Intel GPUs.
-6. **On CPU, OpenVINO is the fastest of the three.** For `yolo11s` fp32:
-   `openvino_cpu` 79.9 ms < `ort_cpu` 84.5 ms < `pytorch_cpu` 132.0 ms. The CPU
-   ordering is **noisy at the L sizes** — e.g. `ort_cpu` measured 73.9 ms on
-   `yolo26s` but 412.2 ms on `yolo26l`, and `ort_cpu` (2.4 fps) even edged out
-   `pytorch_cpu` (2.4 fps) there. At 2–4 fps a 4-core desktop CPU is saturated and
-   contention/thermal effects dominate, so treat L-size CPU rows as indicative only.
-7. **Pre/post overhead is ~2.5–3 ms** (`e2e` minus `infer`) and is roughly constant
-   across runtimes — letterbox + NMS + un-letterbox are pure NumPy/OpenCV work. On
-   the fastest config it is ~55% of the frame time (`tensorrt fp16` yolo11s:
-   5.88 ms e2e vs 2.67 ms infer), so it is the next thing worth optimizing.
-8. **`host_rss_mb` now requires isolation to be meaningful.** The tables above were
-   produced before per-config subprocesses existed, so RSS accumulated across the
-   56 configs and the later rows looked artificially large — that is why it is not
-   tabulated. Re-run with the current code and it becomes a real per-backend
-   footprint (e.g. `tensorrt` ≈ 1600 MB vs `ort_cuda` ≈ 1900 MB for `yolo11s`).
-9. **`ort_cuda` is FP32-only in practice.** The table lists fp16 because the option
-   exists, but the CUDA EP has no meaningful FP16 speedup here (4.47 → 4.46 ms), and
-   `ort_cuda fp16` is **slightly slower** than `ort_cuda fp32` on the S models
-   (134.9 → 135.3 fps is within noise, but `yolo26s` regresses 127.4 → 131.8/131.8).
-   Read `ort_cuda fp32` as the representative number.
+To add a machine: run `compare --out results/<tag>` there, commit `<tag>.csv` +
+`<tag>.md`, and un-ignore them in `.gitignore`. The notebook picks it up
+automatically.
 
 ## Results interpretation (Rough expectations)
 
-- `torch FP32` < `ort_cuda FP32` — ORT CUDA kernels / graph rewrite. ✅ confirmed (82.2 → 134.9 fps)
-- `tensorrt FP16` ≤ `tensorrt FP32` — FP16 tensor-core throughput on Ampere. ✅ confirmed (138.6 → 170.0 fps)
-- `ort_trt FP16` ≈ `tensorrt FP16` — both run the same TensorRT builder underneath. ❔ **not testable here**: the ORT TensorRT EP needs TensorRT 10 (see the results table footnote).
+These are the *orderings* to expect; the actual numbers live in the per-machine
+CSVs and the notebook charts (the fps figures below are illustrative, from the
+3090 run).
+
+- `torch FP32` < `ort_cuda FP32` — ORT CUDA kernels / graph rewrite. ✅ confirmed (~82 → ~135 fps)
+- `tensorrt FP16` ≤ `tensorrt FP32` — FP16 tensor-core throughput on Ampere. ✅ confirmed (~139 → ~170 fps)
+- `ort_trt FP16` ≈ `tensorrt FP16` — both run the same TensorRT builder underneath. ❔ **not testable on a TRT 11 host**: the ORT TensorRT EP needs a matching TensorRT major (see "Moving to another machine").
 - `ort_trt` first run is slow (engine build); warm-up / engine-cache amorts this. ❔ same blocker.
 - ⚠️ **"FP16 ≈ 2× faster" does NOT hold universally.** It holds for `tensorrt`,
   is neutral for `ort_cuda`, and is *negative* for eager PyTorch. Always check which
@@ -485,7 +413,7 @@ yolo_bench/
   compare.py     # matrix CLI -> CSV + Markdown
   check.py       # correctness gate vs ultralytics .predict()
   env.py         # hardware/library fingerprint for cross-machine provenance
-  plots.py       # Plotly chart builders (nested/grouped fps, speedup)
+  plots.py       # Plotly chart builders (Q1-Q4: slope, heatmap, scatter, gpu)
   utils.py       # timing, metadata, device helpers
   orchestrate/   # test orchestration: matrix, subprocess isolation, experiments
     __init__.py
@@ -501,10 +429,10 @@ yolo_bench/
     ort.py        # ORT CUDA EP + ORT TensorRT EP + ort_cpu
     tensorrt.py   # native TensorRT (deserialize .engine)
     openvino.py   # OpenVINO GPU device + openvino_cpu
-results.ipynb    # run experiments + draw charts
+results.ipynb    # reads results/*.csv, draws Q1-Q4 charts, writes insights.md
 models/          # .pt / .onnx / .engine / .meta.json  (git-ignored)
 data/            # sample clip + bus.jpg               (git-ignored)
-results/         # compare.csv / compare.md / final.*     (git-ignored)
+results/         # <tag>.csv + <tag>.md per machine (committed); scratch ignored
 ```
 
 ## Known limitations / notes

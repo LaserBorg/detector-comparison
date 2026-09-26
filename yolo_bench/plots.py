@@ -7,7 +7,7 @@ Bar charts were the starting point, but they answer "what is the value at this
 category?" and most of the interesting questions here are about *relationships*:
 
   1. **Runtime comparison** — how do backends rank, and does the ranking hold
-     across model sizes?  -> :func:`runtime_slope` (slope/dumbbell per runtime)
+     across model sizes?  -> :func:`runtime_slope` (grouped bars per runtime)
      or :func:`runtime_ranking_heatmap` for the full matrix.
   2. **Performance vs model quality/size** — the trade-off curve. Needs a quality
      metric, so :func:`quality_vs_speed` plots *anything* on x (GFLOPs, params,
@@ -17,7 +17,7 @@ category?" and most of the interesting questions here are about *relationships*:
      detections. -> :func:`quantization_gain_heatmap` plus
      :func:`quantization_tradeoff`.
   4. **GPU comparison** — the same measurement across machines. -> faceted
-     scatter/lines grouped by ``gpu_name``.
+     grouped bars per (machine, runtime), grouped by ``gpu_name``.
 
 Two structural notes:
 
@@ -88,6 +88,43 @@ def model_order(models) -> list[str]:
         return (family, int(digits) if digits else 0, size_rank)
 
     return sorted(set(models), key=key)
+
+
+def model_order_by_size(models) -> list[str]:
+    """Sort models size-major: all small first, then all large.
+
+    yolo11s, yolo26s, yolo11l, yolo26l — groups by size class so the x-axis
+    reads "small models | large models" rather than interleaving families.
+    """
+    SIZE_ORDER = "nsmlx"
+
+    def key(m: str):
+        stem = m
+        size = stem[-1] if stem and stem[-1] in SIZE_ORDER else ""
+        if size:
+            stem = stem[:-1]
+        family = "".join(c for c in stem if not c.isdigit())
+        digits = "".join(c for c in stem if c.isdigit())
+        size_rank = SIZE_ORDER.index(size) if size else 99
+        return (size_rank, family, int(digits) if digits else 0)
+
+    return sorted(set(models), key=key)
+
+
+# Expected relative performance rank (ascending: 0 = slowest).
+# Used to order heatmap rows so the fastest runtime is at the bottom.
+RUNTIME_PERF_RANK: dict[str, int] = {
+    "ort_cpu": 0, "pytorch_cpu": 0, "openvino_cpu": 0,
+    "openvino": 1,
+    "pytorch": 2,
+    "ort_cuda": 3,
+    "tensorrt": 4,
+}
+
+
+def runtime_perf_order(runtimes) -> list[str]:
+    """Order runtimes by expected performance (ascending: slowest first)."""
+    return sorted(runtimes, key=lambda r: RUNTIME_PERF_RANK.get(r, 99))
 
 
 def _pivot(df, metric: str):
@@ -169,14 +206,10 @@ def runtime_slope(
     height: int = 560,
     show_values: bool = True,
 ):
-    """Slope chart: one line per runtime, one x-slot per model, grouped by size.
+    """Grouped bar chart: x = model, one bar per runtime, faceted by size.
 
-    Chosen over bars because the question here is a *ranking* that may reorder as
-    the model grows. A slope line makes a crossing obvious ("openvino overtakes
-    pytorch at L") while a bar group hides it, and it removes the zero baseline
-    that makes CPU and CUDA backends impossible to show together.
-
-    Log y is the default for the same reason: backends here span ~20x.
+    Bars make the absolute value at each (model, runtime) cell immediately
+    readable; the log y-axis keeps CPU and CUDA backends on the same scale.
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -192,7 +225,7 @@ def runtime_slope(
         rows=1, cols=len(groups),
         column_titles=[name for name, _ in groups],
         shared_yaxes=True,
-        horizontal_spacing=0.06,
+        horizontal_spacing=0.08,
     )
 
     ylabel = _metric_label(metric)
@@ -212,14 +245,12 @@ def runtime_slope(
             if not xs:
                 continue
             fig.add_trace(
-                go.Scatter(
+                go.Bar(
                     x=xs, y=ys, name=_runtime_label(runtime),
-                    mode="lines+markers+text" if show_values else "lines+markers",
-                    text=texts, textposition="middle right",
+                    marker_color=_runtime_color(runtime, runtimes),
+                    text=texts if show_values else None,
+                    textposition="outside",
                     textfont=dict(size=9),
-                    line=dict(width=2.4, color=_runtime_color(runtime, runtimes)),
-                    marker=dict(size=11, symbol=RUNTIME_SYMBOLS.get(runtime, "circle"),
-                                line=dict(width=1, color="white")),
                     showlegend=(col == 1),
                     legendgroup=runtime,
                     hovertemplate=(f"<b>%{{x}}</b><br>{_runtime_label(runtime)}"
@@ -236,8 +267,9 @@ def runtime_slope(
         title=title or (f"{ylabel} by runtime, split by model size "
                         f"({precision.upper() if precision else 'all precisions'})"),
         height=height, width=max(700, 380 * len(groups)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0, title=None),
-        margin=dict(t=130, b=60, l=80, r=60),
+        barmode="group", bargap=0.25, bargroupgap=0.08,
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0, title=None),
+        margin=dict(t=160, b=60, l=80, r=60),
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode="x unified",
     )
@@ -268,8 +300,8 @@ def runtime_ranking_heatmap(
     data = ok_rows(df)
     if precision:
         data = data[data["precision"] == precision]
-    runtimes = _resolve_runtimes(data, runtimes)
-    models = [m for m in (models or model_order(data["model"].unique()))
+    runtimes = runtime_perf_order(_resolve_runtimes(data, runtimes))
+    models = [m for m in (models or model_order_by_size(data["model"].unique()))
               if m in set(data["model"])]
 
     grid = np.full((len(runtimes), len(models)), np.nan)
@@ -775,8 +807,8 @@ def quality_vs_speed(
         title=title or (f"{_metric_label(metric)} vs {quality.replace('_', ' ')}"
                         f" ({precision.upper() if precision else 'all'})"),
         height=height, width=max(700, 420 * len(groups)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.06, x=0, title=None),
-        margin=dict(t=130, b=70, l=80, r=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0, title=None),
+        margin=dict(t=160, b=70, l=80, r=50),
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode="closest",
     )
@@ -798,20 +830,21 @@ def quantization_gain_heatmap(
     annotate: bool = True,
     clamp: float = 2.0,
 ):
-    """FP16 speedup as a diverging heatmap (``fp16 / fp32``, 1.0 = no change).
+    """FP16 speedup heatmap (``fp16 / fp32``, 1.0 = no change).
 
-    A diverging scale centred on 1.0 with a white midpoint is the honest encoding:
-    "no effect" is visually neutral, a gain and a *regression* are opposite
-    colours. A bar chart of the same data makes a regression look like a small
-    gain. Clamping at ``clamp`` keeps one large outlier from washing out the
-    scale; the annotated number is always the true, unclamped value.
+    Uses the same sequential (Viridis) scale as the ranking heatmap: a diverging
+    scale centred on 1.0 is misleading here because 1.0 is *not* the middle of
+    the observed range (~0.5–2.0), so it paints every "no gain" cell reddish.
+    With a sequential scale, darker = bigger gain, and the annotated number is
+    always the true, unclamped value. Clamping at ``clamp`` keeps one large
+    outlier from washing out the scale.
     """
     import numpy as np
     import plotly.graph_objects as go
 
     data = ok_rows(df)
-    runtimes = _resolve_runtimes(data, runtimes)
-    models = [m for m in (models or model_order(data["model"].unique()))
+    runtimes = runtime_perf_order(_resolve_runtimes(data, runtimes))
+    models = [m for m in (models or model_order_by_size(data["model"].unique()))
               if m in set(data["model"])]
 
     grid = np.full((len(runtimes), len(models)), np.nan)
@@ -838,13 +871,9 @@ def quantization_gain_heatmap(
         x=models, y=[_runtime_label(r) for r in runtimes],
         text=text if annotate else None,
         texttemplate="%{text}" if annotate else None,
-        textfont=dict(size=11, color="#111"),
-        # 1.0 = white/neutral, green = gain, red = regression.
-        zmid=1.0,
-        colorscale=[
-            [0.0, "#b2182b"], [0.25, "#ef8a62"], [0.5, "#f7f7f7"],
-            [0.75, "#67a9cf"], [1.0, "#2166ac"],
-        ],
+        textfont=dict(size=11),
+        # Sequential scale (same as the ranking heatmap): darker = bigger gain.
+        colorscale="Viridis",
         zmin=1.0 / clamp, zmax=clamp,
         colorbar=dict(title=f"{metric} ratio<br>(fp16 / fp32)",
                       tickvals=[1 / clamp, 0.75, 1.0, 1.25, clamp],
@@ -856,7 +885,7 @@ def quantization_gain_heatmap(
     ))
     fig.update_layout(
         title=title or (f"Quantization advantage — {metric} ratio "
-                        f"(white ≈ 1.0x = FP16 bought nothing)"),
+                        f"(darker = bigger FP16 gain; 1.0x = no gain)"),
         height=height, width=max(560, 190 * len(models) + 260),
         xaxis_title=None, yaxis_title=None,
         margin=dict(t=100, b=60, l=170, r=40),
@@ -982,13 +1011,14 @@ def gpu_comparison(
     title: str | None = None,
     height: int = 620,
 ):
-    """Same measurement across machines: one line per (machine, runtime).
+    """Same measurement across machines: grouped bars, one per (machine, runtime).
 
     Requires a **merged** frame (concatenate the ``results/*.csv`` from each
     machine) — every row already carries ``gpu_name``/``gpu_arch``/``cpu``, which
-    is what makes this possible at all. Lines rather than bars because the
-    interesting output is the *gap between machines* at each model size, and a
-    line pair makes both the gap and the trend readable at once.
+    is what makes this possible at all. Bars make the *gap between machines* at
+    each model directly comparable; the first machine is drawn at full opacity,
+    later machines lighter, so a pair of bars at one model reads as "same
+    runtime, two machines".
 
     ⚠️ Rows from different TensorRT majors are not version-comparable; the legend
     and hover carry the runtime's own version so a mixed comparison is visible
@@ -1011,13 +1041,13 @@ def gpu_comparison(
     fig = make_subplots(
         rows=1, cols=len(groups),
         column_titles=[name for name, _ in groups],
-        shared_yaxes=True, horizontal_spacing=0.06,
+        shared_yaxes=True, horizontal_spacing=0.08,
     )
 
     for col, (_, models) in enumerate(groups, start=1):
         for machine in machines:
             for runtime in runtimes:
-                xs, ys, versions = [], [], []
+                xs, ys = [], []
                 for model in models:
                     sel = data[(data["model"] == model)
                                & (data["runtime"] == runtime)
@@ -1029,7 +1059,6 @@ def gpu_comparison(
                         continue
                     xs.append(model)
                     ys.append(value)
-                    versions.append(str(sel["torch"].iloc[0]) if "torch" in sel else "")
                 if not xs:
                     continue
                 # Truncate the machine name so the legend stays readable.
@@ -1040,18 +1069,14 @@ def gpu_comparison(
                               & (data[facet] == machine)]["runtime_version"]
                     if not rv.empty and rv.notna().any():
                         version = f" v{rv.dropna().iloc[0]}"
-                fig.add_trace(go.Scatter(
+                # First machine at full opacity, later machines lighter, so a
+                # pair of bars at one model reads as "same runtime, two machines".
+                opacity = 1.0 if machine == machines[0] else 0.55
+                fig.add_trace(go.Bar(
                     x=xs, y=ys,
                     name=f"{short} · {runtime}{version}",
-                    mode="lines+markers",
-                    line=dict(width=2.2,
-                              color=_runtime_color(runtime, runtimes),
-                              dash=("solid" if machine == machines[0] else "dash")),
-                    marker=dict(
-                        size=10, symbol=RUNTIME_SYMBOLS.get(runtime, "circle"),
-                        color=_runtime_color(runtime, runtimes),
-                        line=dict(width=1, color="white"),
-                    ),
+                    marker_color=_runtime_color(runtime, runtimes),
+                    marker_opacity=opacity,
                     showlegend=(col == 1),
                     legendgroup=f"{machine}-{runtime}",
                     hovertemplate=(f"<b>%{{x}}</b><br>{short} · "
@@ -1067,9 +1092,10 @@ def gpu_comparison(
         title=title or (f"{_metric_label(metric)} across machines, by model size"
                         f" ({precision.upper() if precision else 'all'})"),
         height=height, width=max(720, 430 * len(groups)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.08, x=0,
+        barmode="group", bargap=0.25, bargroupgap=0.08,
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0,
                     font=dict(size=10), title=None),
-        margin=dict(t=150, b=60, l=80, r=50),
+        margin=dict(t=160, b=60, l=80, r=50),
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode="x unified",
     )
