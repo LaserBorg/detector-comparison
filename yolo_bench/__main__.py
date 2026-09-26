@@ -1,4 +1,4 @@
-"""Unified CLI: python -m yolo_bench {export,bench,check,compare,run,list} ...
+"""Unified CLI: python -m yolo_bench {export,bench,predict,check,compare,run,list} ...
 
 The CLI is a *convenience* over the library. The same work is available
 programmatically:
@@ -19,6 +19,7 @@ _SUBCOMMANDS = (
     "export",     # .pt -> .onnx -> .engine
     "check",      # correctness gate vs ultralytics .predict()
     "bench",      # one config
+    "predict",    # inference only: draw detections, save annotated mp4
     "compare",    # a matrix -> csv + md
     "run",        # named experiment (alias for compare --experiment)
     "list",       # list runtimes / experiments
@@ -43,6 +44,9 @@ def main(argv=None) -> int:
         return run(rest)
     if sub == "bench":
         from .bench import main as run
+        return run(rest)
+    if sub == "predict":
+        from .predict import main as run
         return run(rest)
     if sub == "compare":
         from .compare import main as run

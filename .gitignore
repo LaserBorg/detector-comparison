@@ -22,6 +22,9 @@ results/*
 !results/orin-nano.csv
 !results/orin-nano.md
 
+# video results
+out/*
+
 # ONNX Runtime TensorRT engine cache
 models/ort_trt_cache/
 

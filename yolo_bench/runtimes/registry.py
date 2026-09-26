@@ -134,7 +134,7 @@ RUNTIME_SPECS: tuple[RuntimeSpec, ...] = (
         group="cuda",
         requires=("onnxruntime",),
         factory=_ort_trt,
-        note="needs a TensorRT major matching the ORT build (see README)",
+        note="needs a TensorRT major matching the ORT build (see docs/known-issues.md)",
     ),
     RuntimeSpec(
         kind="ort_cuda",
@@ -154,7 +154,7 @@ RUNTIME_SPECS: tuple[RuntimeSpec, ...] = (
         group="cuda",
         requires=("torch",),
         factory=_pytorch,
-        note="eager; fp16 is *slower* here (latency-bound, see README)",
+        note="eager; fp16 is *slower* here (latency-bound, see docs/known-issues.md)",
     ),
     RuntimeSpec(
         kind="openvino",
