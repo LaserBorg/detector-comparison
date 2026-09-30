@@ -78,13 +78,6 @@ def blob_numpy(padded: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(x[None])
 
 
-def blob_torch(padded: np.ndarray, device) -> "torch.Tensor":
-    """Letterboxed BGR -> (1, 3, IMGSZ, IMGSZ) float32 on `device`, CHW, RGB."""
-    import torch  # lazy: only used by callers that pass a torch device
-
-    return torch.from_numpy(blob_numpy(padded)).to(device)
-
-
 def _xywh2xyxy(xywh: np.ndarray) -> np.ndarray:
     out = np.empty_like(xywh, dtype=np.float32)
     out[:, 0] = xywh[:, 0] - xywh[:, 2] / 2
@@ -175,29 +168,3 @@ class YoloArchitecture(Architecture):
             raw = raw[0]
         return postprocess(np.asarray(raw), self.nc, ctx,
                            conf=conf, iou=iou, max_det=max_det)
-
-    def torch_runner(self, model: str, device, precision: str):
-        import torch  # lazy: only the 'pytorch' runtime needs it
-        from ultralytics import YOLO
-
-        # Strict FP32: disable TF32 so "fp32" is genuinely 32-bit math, matching
-        # what the ONNX graph / --noTF32 engine builds produce for a fair compare.
-        if torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = False
-            torch.backends.cudnn.allow_tf32 = False
-        dtype = torch.float16 if precision == "fp16" else torch.float32
-
-        m = YOLO(str(self.checkpoint_path(model)))
-        net = m.model.eval().to(device)
-        if precision == "fp16" and device.type == "cuda":
-            net = net.half()
-
-        def run(blob: np.ndarray) -> np.ndarray:
-            x = torch.from_numpy(blob).to(device).to(dtype)
-            with torch.no_grad():
-                y = net(x)
-            if isinstance(y, (tuple, list)):
-                y = y[0]
-            return y.float().cpu().numpy()
-
-        return run

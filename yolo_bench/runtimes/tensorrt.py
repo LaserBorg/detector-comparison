@@ -65,9 +65,7 @@ class TensorRTExecutor(RuntimeExecutor):
         self._track_artifact(artifact)
         if not Path(engine_path).exists():
             raise FileNotFoundError(
-                f"{engine_path} missing; build it first with "
-                f"`python -m yolo_bench.export --onnx-only --precisions "
-                f"{self.precision}`."
+                f"{engine_path} missing; build it first with trtexec."
             )
 
         self._device = cuda_device()
@@ -75,9 +73,18 @@ class TensorRTExecutor(RuntimeExecutor):
 
         runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
         with open(engine_path, "rb") as f:
-            self._engine = runtime.deserialize_cuda_engine(f.read())
+            engine_bytes = _unwrap_ultralytics_engine(f.read())
+        self._engine = runtime.deserialize_cuda_engine(engine_bytes)
         if self._engine is None:
-            raise RuntimeError(f"Could not deserialize {engine_path}")
+            model_name = Path(engine_path).name.split(".", 1)[0]
+            raise RuntimeError(
+                f"Could not deserialize {engine_path}. The engine was built "
+                "with an incompatible TensorRT version, GPU, or operating "
+                "system. Rebuild it on this machine with:\n"
+                f"  python -m yolo_bench.export --model {model_name} "
+                f"--precision {self.precision} --force\n"
+                f"Installed TensorRT: {trt.__version__}"
+            )
 
         self._context = self._engine.create_execution_context()
 
@@ -167,8 +174,6 @@ class TensorRTExecutor(RuntimeExecutor):
             ok = self._context.execute_v2(self._bindings)
         if not ok:
             raise RuntimeError("TensorRT execution failed (engine may not match input shape).")
-        # Synchronize so the output tensor is ready before we copy it out.
-        torch.cuda.synchronize(self._device)
         # The wrapper's contract is fp32 raw output regardless of engine precision.
         return self._output_t.cpu().numpy().astype(np.float32, copy=False)
 
@@ -191,3 +196,19 @@ class TensorRTExecutor(RuntimeExecutor):
             return trt.__version__
         except Exception:
             return None
+
+
+def _unwrap_ultralytics_engine(data: bytes) -> bytes:
+    """Remove Ultralytics' length-prefixed JSON metadata from an engine.
+
+    Ultralytics writes ``uint32 metadata_length + JSON + raw TensorRT engine``
+    to its ``.engine`` files. Native TensorRT expects only the final payload.
+    Raw engines pass through unchanged.
+    """
+    if len(data) < 8 or data[4:5] != b"{":
+        return data
+    metadata_length = int.from_bytes(data[:4], "little")
+    payload_start = 4 + metadata_length
+    if data[payload_start:payload_start + 4] == b"ftrt":
+        return data[payload_start:]
+    return data

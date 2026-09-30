@@ -1,15 +1,10 @@
-"""Architecture base: per-model-family pre/post + artifact resolution.
+"""Base contract for YOLO preprocessing and postprocessing.
 
 An ``Architecture`` is the only place that knows a detector family's contract:
 
   * how to ``prepare`` a BGR frame into the input blob (+ a decode context),
   * how to ``decode`` the raw model output into ``(M, 6) [x1,y1,x2,y2,conf,cls]``,
-  * where its artifacts live (``checkpoint_path`` / ``onnx_path`` / ``engine_path``),
-  * how to build a PyTorch front-end ``torch_runner`` from the checkpoint.
-
-Keeping this separate from ``runtimes/`` is what lets the ``Detector`` wrapper
-swap runtimes transparently **and** lets us add new architectures (e.g. RF-DETR)
-with completely different pre/post without touching any runtime or the wrapper.
+    * where its TensorRT engine lives.
 """
 
 from __future__ import annotations
@@ -54,24 +49,5 @@ class Architecture(ABC):
 
     # -- artifacts -----------------------------------------------------------
 
-    def checkpoint_path(self, model: str) -> Path:
-        return config.model_pt(model)
-
-    def onnx_path(self, model: str) -> Path:
-        return config.model_onnx(model)
-
     def engine_path(self, model: str, precision: str) -> Path:
         return config.model_engine(model, precision)
-
-    # -- PyTorch front-end ---------------------------------------------------
-
-    def torch_runner(self, model: str, device, precision: str):
-        """Return a ``callable(blob) -> raw`` running the checkpoint in PyTorch.
-
-        Raises ``NotImplementedError`` if the architecture has no PyTorch
-        front-end. The model build lives here (not in the runtime) because
-        loading a checkpoint differs per architecture.
-        """
-        raise NotImplementedError(
-            f"Architecture '{self.name}' does not provide a PyTorch runner."
-        )

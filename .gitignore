@@ -1,32 +1,17 @@
+docs/
+
 # Model artifacts (checkpoints, exported onnx/engine) — large, rebuildable
-models/
-!models/.gitkeep
+models/*
 
 # Sample input video + calibration data
-data/
-!data/.gitkeep
+data/*
 
-# Benchmark outputs (csv / markdown / annotated videos) are ignored by default.
-# NOTE: we ignore the *contents* (`results/*`), not the directory itself — git
-# cannot re-include a file whose parent directory is excluded, so `results/`
-# would make the `!` lines below dead.
-# The canonical per-machine results are the single source of truth and ARE
-# committed: one <tag>.csv + <tag>.md per machine, where <tag> is the machine
-# name (e.g. rtx3090, rtx3070, orin-nano). Each machine runs `compare --out
-# results/<tag>` and commits its own pair. Scratch runs (smoke, ad-hoc) stay
-# ignored. Add a new machine by un-ignoring its two files below.
 results/*
-!results/.gitkeep
-!results/rtx3090.csv
-!results/rtx3090.md
-!results/orin-nano.csv
-!results/orin-nano.md
-
 # video results
 out/*
 
 # ONNX Runtime TensorRT engine cache
-models/ort_trt_cache/
+models/
 
 # Python
 __pycache__/

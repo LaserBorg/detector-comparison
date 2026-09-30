@@ -7,12 +7,10 @@ here — nothing else changes.
 """
 
 from .base import Architecture
-from .rfdetr import RfDetrArchitecture
 from .yolo import YoloArchitecture
 
 _REGISTRY = {
     "yolo": YoloArchitecture,
-    "rfdetr": RfDetrArchitecture,
 }
 
 
@@ -33,7 +31,6 @@ def supported_architectures() -> list[str]:
 __all__ = [
     "Architecture",
     "YoloArchitecture",
-    "RfDetrArchitecture",
     "create_arch",
     "supported_architectures",
 ]

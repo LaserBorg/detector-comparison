@@ -1,88 +1,9 @@
-# YOLO inference benchmark requirements
-#
-# Two install tiers, because the project is split into an inference library and a
-# test harness:
-#
-#   [runtime]  run any EXISTING .onnx / .engine. No ultralytics, no pandas.
-#   [convert]  additionally export .pt -> .onnx and run the `pytorch` runtime.
-#
-# The Jetson / 3070 clones only need [runtime]: they receive .pt files and build
-# engines locally, and never export ONNX.
-#
-# NOTE: install ordering matters on NVIDIA. Install torch first (matching your
-# CUDA toolkit), then the other packages. TensorRT wheels are CUDA-versioned.
-#
-# Recommended base environment: Python 3.12 (not 3.13/3.14 — several of these
-# do not yet ship wheels for 3.14).
-
-# --- Core runtime -----------------------------------------------------------
+# Runtime dependencies for native TensorRT webcam inference.
 numpy>=1.26
 opencv-python>=4.9
-# PyTorch with CUDA — pick the right index per your CUDA version:
-#   CUDA 13:  pip install torch --index-url https://download.pytorch.org/whl/cu130
-#   CUDA 12:  pip install torch --index-url https://download.pytorch.org/whl/cu124
-# Required even for the compiled-artifact runtimes: the native TensorRT executor
-# uses torch tensors for device memory management (instead of pycuda).
+# Install a CUDA-enabled build matching the host before this file.
 torch>=2.4
-
-# --- Harness / notebook (charts + result tables) -----------------------------
-pandas>=2.0
-plotly>=5.20
-
-# --- ONNX Runtime: GPU (CUDA + TensorRT EPs) --------------------------------
-# Choose the build matching BOTH your CUDA and your TensorRT major — the
-# TensorRT EP is linked against a specific libnvinfer.so.N:
-#   ORT <= 1.26.0 : CUDA 12 + TensorRT 10   <- use with tensorrt 10.x
-#   ORT >= 1.28.0 : CUDA 13 + TensorRT 10
-# There is no ORT build for TensorRT 11, so on a TRT-11 host the `ort_trt`
-# runtime is unavailable (the registry reports it as skipped, and the executor
-# refuses to silently fall back to another EP).
-onnxruntime-gpu>=1.20
-
-# === [convert] tier — only needed to export .pt -> .onnx or run `pytorch` =====
-# Ultralytics is AGPL-3.0. Nothing in the inference path imports it: `tensorrt`,
-# `ort_*` and `openvino` consume the compiled artifacts directly, and the
-# pre/post processing is implemented in this repo. It IS required for
-# `.pt` -> `.onnx` export (the Detect head's DFL/dist2bbox bakes in during
-# tracing) and for the eager `pytorch*` runtimes.
-ultralytics>=8.3.0
-onnx>=1.16
-
-# --- Native TensorRT --------------------------------------------------------
-# Install the wheel matching your CUDA (e.g. tensorrt==10.x-cu12).
-# NOTE: the PyPI 'tensorrt' wheel ships the Python bindings ONLY — it does NOT
-# contain the 'trtexec' binary. yolo_bench therefore builds engines through the
-# TensorRT Python API. trtexec is only present with a full TensorRT install
-# (JetPack on Jetson, or the NVIDIA tarball); `export --via trtexec` will use it
-# if found, otherwise the Python API is used automatically.
 tensorrt>=10.0
-
-# --- FP16 ONNX conversion (required for TensorRT >= 11) ----------------------
-# TensorRT 11 is strongly-typed only: it removed BuilderFlag.FP16/INT8 and the
-# INT8 calibrator, so FP16 must be baked into the ONNX graph before the engine
-# is built. Used by `yolo_bench export --precisions fp16` (AutoCast, keeps I/O
-# in FP32 so fp32/fp16 stay comparable).
-nvidia-modelopt[onnx]>=0.44
-
-# --- IMPORTANT: keep onnxruntime-gpu on a CUDA-13 build ----------------------
-# nvidia-modelopt pins an older onnxruntime-gpu (1.24.x, CUDA 12 / cuDNN 9),
-# which makes the CUDA/TensorRT execution providers fail to load on a CUDA 13
-# host and silently fall back to CPU. After installing modelopt, re-assert:
-#   pip install --no-deps onnxruntime-gpu==1.30.0
-# You can also need the pip NVIDIA libs on the loader path for ORT to find
-# libcublasLt/libcudnn, e.g.:
-#   export LD_LIBRARY_PATH=$(python -c "import nvidia,os;b=os.path.dirname(
-#     nvidia.__file__);print(':'.join(os.path.join(b,d,'lib') for d in
-#     sorted(os.listdir(b)) if os.path.isdir(os.path.join(b,d,'lib'))))"):$LD_LIBRARY_PATH
-
-# --- OpenVINO (optional; adds 'openvino' + 'openvino_cpu' runtimes) ----------
-# Imports ONNX directly, so no extra export step. OpenVINO 2026.x exposes an
-# NVIDIA GPU via its 'GPU' device on this host, but it does NOT use TensorRT
-# kernels and is an order of magnitude slower than the CUDA runtimes — useful as
-# a vendor-neutral data point, not as a TensorRT competitor. 'openvino_cpu' is
-# the more conventional Intel-CPU use and is a solid CPU baseline.
-openvino>=2025.0
-
-# NOTE: 'pytorch_cpu' and 'ort_cpu' need no extra packages — they reuse the
-# already-installed torch / onnxruntime-gpu and simply target the CPU
+# Only needed on a machine that downloads .pt checkpoints and builds engines.
+ultralytics>=8.3.0
 # execution provider.
