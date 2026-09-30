@@ -75,7 +75,8 @@ class TensorRTExecutor(RuntimeExecutor):
 
         runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
         with open(engine_path, "rb") as f:
-            self._engine = runtime.deserialize_cuda_engine(f.read())
+            engine_bytes = _unwrap_ultralytics_engine(f.read())
+        self._engine = runtime.deserialize_cuda_engine(engine_bytes)
         if self._engine is None:
             raise RuntimeError(f"Could not deserialize {engine_path}")
 
@@ -191,3 +192,19 @@ class TensorRTExecutor(RuntimeExecutor):
             return trt.__version__
         except Exception:
             return None
+
+
+def _unwrap_ultralytics_engine(data: bytes) -> bytes:
+    """Remove Ultralytics' length-prefixed JSON metadata from an engine.
+
+    Ultralytics writes ``uint32 metadata_length + JSON + raw TensorRT engine``
+    to its ``.engine`` files. Native TensorRT expects only the final payload.
+    Raw engines pass through unchanged.
+    """
+    if len(data) < 8 or data[4:5] != b"{":
+        return data
+    metadata_length = int.from_bytes(data[:4], "little")
+    payload_start = 4 + metadata_length
+    if data[payload_start:payload_start + 4] == b"ftrt":
+        return data[payload_start:]
+    return data

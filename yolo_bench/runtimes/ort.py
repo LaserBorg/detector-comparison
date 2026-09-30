@@ -25,6 +25,12 @@ class _OrtBase(RuntimeExecutor):
     def _make_session(self, onnx_path):
         import onnxruntime as ort
 
+        # ORT's pip wheel does not automatically expose its bundled NVIDIA
+        # libraries to the dynamic linker (notably in conda/WSL2 environments).
+        preload_dlls = getattr(ort, "preload_dlls", None)
+        if preload_dlls is not None:
+            preload_dlls()
+
         so = ort.SessionOptions()
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess = ort.InferenceSession(

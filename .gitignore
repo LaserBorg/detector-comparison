@@ -19,6 +19,8 @@ results/*
 !results/.gitkeep
 !results/rtx3090.csv
 !results/rtx3090.md
+!results/rtx3070m.csv
+!results/rtx3070m.md
 !results/orin-nano.csv
 !results/orin-nano.md
 

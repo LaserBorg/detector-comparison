@@ -71,6 +71,15 @@ python -m yolo_bench compare --video data/sample_1080p_h264.mp4 --frames 100 \
     --out results/rtx3090
 ```
 
+on RTX3070m, only tensorRT ONNX 16 bit
+```bash
+python -m yolo_bench compare --video data/sample_1080p_h264.mp4 --frames 100 \
+    --models yolo11s \
+    --runtimes ort_cuda tensorrt \
+    --precisions fp16 \
+    --out results/rtx3070m
+```
+
 `results.ipynb` reads every `results/*.csv` (filename stem = machine tag),
 draws the Q1–Q4 charts and writes `results/insights.md`.
 
